@@ -63,6 +63,18 @@ def reload_dicts():
     return _call("reload")
 
 
+def exclude_list():
+    return _call("exclude.list")
+
+
+def exclude_add(pattern, mode):
+    return _call("exclude.add", {"pattern": pattern, "mode": mode})
+
+
+def exclude_del(pattern, mode):
+    return _call("exclude.del", {"pattern": pattern, "mode": mode})
+
+
 def config_set(**kwargs):
     return _call("config.set", kwargs)
 

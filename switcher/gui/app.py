@@ -52,6 +52,10 @@ class Tray:
         self.window = None
         self.status = None
         self._warned = False
+        # Exclusion notifications: what we saw on the previous poll and what we
+        # have already announced (see _notify_exclusions).
+        self._excl_pending = None
+        self._excl_notified = None
 
         self.icon_on = _icon("#2e7d32", "S")
         self.icon_off = _icon("#616161", "S")
@@ -74,6 +78,8 @@ class Tray:
         # into an empty/vanishing row.
         self.act_settings = QAction("Настройки...")
         self.act_settings.triggered.connect(self.open_settings)
+        self.act_excl = QAction("Исключения...")
+        self.act_excl.triggered.connect(self.open_exclusions)
         self.act_reload = QAction("Перечитать словари")
         self.act_reload.triggered.connect(self.reload_dicts)
         self.act_log = QAction("Открыть лог")
@@ -87,7 +93,9 @@ class Tray:
         self.menu.addAction(self.act_start)
         self.menu.addSeparator()
         self.menu.addAction(self.act_pause)
+        self.menu.addSeparator()
         self.menu.addAction(self.act_settings)
+        self.menu.addAction(self.act_excl)
         self.menu.addSeparator()
         self.menu.addAction(self.act_reload)
         self.menu.addAction(self.act_log)
@@ -98,7 +106,9 @@ class Tray:
         self.tray.activated.connect(self.on_activated)
 
         self.timer = QTimer()
-        self.timer.setInterval(2000)
+        # 1 s, not 2: the same poll drives the exclusion notification, and a
+        # game notification two seconds late looks broken.
+        self.timer.setInterval(1000)
         self.timer.timeout.connect(self.refresh)
         self.timer.start()
         self.refresh()
@@ -134,14 +144,58 @@ class Tray:
         self.act_pause.setChecked(paused)
         self.act_pause.setText("Продолжить" if paused else "Пауза")
         self.tray.setIcon(self.icon_pause if paused else self.icon_on)
+        excl = st.get("excluded")
+        suffix = (" | игнорирую " + str(excl)) if excl else ""
         self.tray.setToolTip(
-            "Switcher: " + ("пауза" if paused else "активно")
+            "Switcher: " + ("пауза" if paused else "активно") + suffix
             + " | выучено " + str(st.get("words_learned"))
             + ", заблокировано " + str(st.get("words_blocked")))
         self.act_state.setText(
             "Раскладка: " + str(st.get("layout"))
             + " | выучено " + str(st.get("words_learned"))
-            + " | заблокировано " + str(st.get("words_blocked")))
+            + " | заблокировано " + str(st.get("words_blocked")) + suffix)
+        self._notify_exclusions(st)
+
+    def _notify_exclusions(self, st):
+        """Announce that the switcher stepped aside for an excluded program.
+
+        The daemon already logs this; the tray is what puts it in front of the
+        user. Debounced on purpose: a notification fires only when the state is
+        still the same one poll later, so alt-tabbing out of the game for a
+        second does not produce two popups. Switchable via config
+        notify_exclude.
+        """
+        on = bool((st.get("config") or {}).get("notify_exclude", True))
+        cur = st.get("excluded")
+        if not on:
+            # Remember the state anyway: turning notifications back on must not
+            # replay an old event.
+            self._excl_pending = cur
+            self._excl_notified = cur
+            return
+        if cur != self._excl_pending:
+            self._excl_pending = cur
+            return                       # first sighting: wait for the next poll
+        if cur == self._excl_notified:
+            return
+        if cur:
+            self._excl_notified = cur
+            why = ("окно активно" if st.get("excluded_mode") == "focus"
+                   else "процесс запущен")
+            self.tray.showMessage(
+                "Switcher не активен",
+                "Игнорирую «" + str(cur) + "» (" + why + "): клавиатура не "
+                "перехватывается, автокоррекция и хоткеи для этой программы "
+                "выключены.",
+                QSystemTrayIcon.Information, 5000)
+        elif self._excl_notified:
+            prev = self._excl_notified
+            self._excl_notified = None
+            self.tray.showMessage(
+                "Switcher снова активен",
+                "«" + str(prev) + "» больше не мешает: перехват клавиатуры и "
+                "автокоррекция вернулись.",
+                QSystemTrayIcon.Information, 4000)
 
     def on_pause(self):
         if not self.status:
@@ -159,12 +213,17 @@ class Tray:
             self.tray.showMessage("Switcher", str(e), QSystemTrayIcon.Warning)
         self.refresh()
 
-    def open_settings(self):
+    def open_settings(self, tab=None):
         if self.window is None:
             self.window = SettingsWindow()
+        if tab is not None:
+            self.window.select_tab(tab)
         self.window.show()
         self.window.raise_()
         self.window.activateWindow()
+
+    def open_exclusions(self):
+        self.open_settings(tab=1)
 
     def open_log(self):
         try:

@@ -111,6 +111,14 @@ class Interceptor:
         self.log = print                     # main() swaps in the file logger
         self.rescan = True                   # re-scan /dev/input for new keyboards
         self.scan = keyboard_paths           # swap out in tests
+        # Exclusion mode. The daemon sets suppress_requested from its focus
+        # watcher; the loop below applies it. Kept as a plain flag set from
+        # another thread on purpose: only this loop may touch the devices.
+        self.suppress_requested = False
+        self.suppressed = False
+        # Called once when we take the keyboard back: KWin owns the layout in
+        # the meantime, so the daemon has to look it up again (see daemon.py).
+        self.on_resume = None
 
         caps = set()
         for d in self.devices:
@@ -202,7 +210,10 @@ class Interceptor:
                 continue
             try:
                 d = InputDevice(p)
-                d.grab()
+                if not self.suppressed:
+                    # While suppressed we track the device but leave it alone:
+                    # grabbing here would put us back in the way of the game.
+                    d.grab()
                 self.devices.append(d)
                 added += 1
                 self.log(f"keyboard connected: {p} ({d.name})")
@@ -214,10 +225,16 @@ class Interceptor:
     # -- main loop ---------------------------------------------------------
     def run(self):
         try:
-            if not self._grab():
+            if self.suppress_requested:
+                # Started while an excluded program owns the screen (the daemon
+                # polls focus before the first grab): stay out of the way.
+                self._set_suppressed(True)
+            elif not self._grab():
                 raise RuntimeError("could not grab any keyboard: add user to group input")
             last_scan = 0.0
             while not self._stop:
+                if self.suppress_requested != self.suppressed:
+                    self._set_suppressed(self.suppress_requested)
                 if not self.devices:
                     # No keyboard right now (BT switched to another host, went
                     # to sleep, unplugged). Do NOT exit: wait and look again.
@@ -230,7 +247,9 @@ class Interceptor:
                     time.sleep(0.2)
                     continue
                 try:
-                    r, _, _ = select.select(self.devices, [], [], 0.5)
+                    # 0.25 s, not 0.5: the loop must notice an exclusion change
+                    # (ungrab / re-grab) quickly, and this is the only wakeup.
+                    r, _, _ = select.select(self.devices, [], [], 0.25)
                 except (OSError, ValueError):
                     self._prune()
                     continue
@@ -255,6 +274,47 @@ class Interceptor:
                 self._ui.close()
             except Exception:
                 pass
+
+    # -- exclusion ---------------------------------------------------------
+    def _set_suppressed(self, want):
+        """Own the keyboard, or get out of its way completely.
+
+        want=True  - an excluded program (a game) is in charge: ungrab every
+                     keyboard, so the kernel delivers the events straight to it
+                     with zero added latency and no modifier staging, and drop
+                     all word state.
+        want=False - grab again.
+        """
+        want = bool(want)
+        if want == self.suppressed:
+            return
+        self.buffer.clear()
+        self._held.clear()
+        self._in_combo = False
+        self._mods.clear()
+        self._mods_swallowed.clear()
+        if want:
+            # Anything already staged belongs to the window that is losing
+            # focus: hand it over instead of eating a held Ctrl/Alt.
+            self._flush_mods()
+            self._ungrab()
+            self.suppressed = True
+            self.log("exclusion ON: keyboard released, not intercepting")
+            return
+        self.suppressed = False
+        # The layout could have been switched (by KWin, since the game had the
+        # raw keyboard): our idea of it is stale and decide() would read the
+        # wrong text for the first word after the game. One DBus read, once.
+        if self.on_resume is not None:
+            try:
+                self.on_resume()
+            except Exception as exc:
+                self.log("resume hook failed: " + str(exc))
+        # A keyboard may have appeared while we were away (BT reconnected in
+        # the middle of a game): scan first, then take what is there.
+        self._rescan()
+        n = self._grab()
+        self.log(f"exclusion OFF: grabbed {n} keyboard(s) again")
 
     def _dispatch(self, ev):
         if ev.type == ecodes.EV_KEY:

@@ -7,6 +7,11 @@
 #   python -m switcher.ctl learned.del layout=us word=ult
 #   python -m switcher.ctl blocked.add layout=ru word=да
 #   python -m switcher.ctl config.set min_len=2 debug=true
+#
+# Exclusions ("leave this program alone completely"):
+#   python -m switcher.ctl exclude                     # both lists + active one
+#   python -m switcher.ctl exclude.add pattern=dota2 mode=focus
+#   python -m switcher.ctl exclude.del pattern=dota2 mode=focus
 from __future__ import annotations
 
 import json
@@ -38,7 +43,7 @@ def main(argv=None):
     cmd = argv[0]
     rest = argv[1:]
 
-    if cmd in ("learned", "blocked"):
+    if cmd in ("learned", "blocked", "exclude"):
         cmd = cmd + ".list"
     elif cmd == "config":
         cmd = "config.get"

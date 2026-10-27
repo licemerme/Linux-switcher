@@ -1,7 +1,9 @@
 # Switcher Linux
 
+[Русский](README.md) | [English](README.en.md)
+
 Автоматическое исправление слов, набранных в неправильной раскладке (RU/EN),
-для KDE / X11. Идейный аналог Punto Switcher.
+для KDE Plasma (X11 и Wayland). Идейный аналог Punto Switcher.
 
 Демон захватывает клавиатуру через `EVIOCGRAB` и пересылает события в систему
 через `uinput`. Когда слово завершено (пробел, Enter, Tab), он проверяет его
@@ -18,13 +20,21 @@
   shifted-символы цифрового ряда вставляются на правильную физическую клавишу
 - Обучение и бан слов: `Ctrl+Alt+T` / `Ctrl+Alt+B`, откат `Ctrl+Alt+Z`
 - Пауза `Ctrl+Alt+P`
-- Иконка в трее и окно настроек (PySide6): списки слов, поведение, лог
+- Исключения по программам: добавь игру (например `dota2`) в трее — свитчер
+  отпускает для неё клавиатуру и не вмешивается вообще: ни перехвата, ни
+  staging-модификаторов, ни хоткеев. Есть режим «пока окно активно» (игры,
+  X11/XWayland) и «пока процесс запущен»; трей показывает уведомление
+  «Switcher не активен: dota2» и сообщает, когда перехват вернулся.
+  В «Настройки → Исключения → Добавить...» есть список запущенных приложений
+  (Steam-игры с человеческим названием, десктоп-приложения, X11-окна), режим
+  подставляется сам; имя процесса можно вписать и руками
+- Иконка в трее и окно настроек (PySide6): списки слов, исключения, поведение, лог
 - Один экземпляр демона, IPC по `$XDG_RUNTIME_DIR/switcher_linux.sock`
 
 ## Установка (Fedora, RPM)
 
 ```fish
-sudo dnf install ./switcher-1.0.0-1.fc44.noarch.rpm
+sudo dnf install ./switcher-*.rpm
 sudo usermod -aG input $USER     # доступ к /dev/input, требуется перелогин
 systemctl --user enable --now switcher
 ```
@@ -51,8 +61,26 @@ switcher-ctl log 20
 перечитывает по `switcher-ctl config.reload` или из окна настроек трея.
 
 Ключевые параметры: `min_len`, `settle`, `settle_dbus`, `gap_bs`, `gap_type`,
-`debug`. Выученные и забаненные слова лежат рядом: `learned.json`,
-`blocked.json`.
+`debug`, `exclude_focus`, `exclude_running`, `notify_exclude` (уведомления трея
+о том, что свитчер уступил программу). Выученные и забаненные слова лежат
+рядом: `learned.json`, `blocked.json`.
+
+Исключения — это массивы имён процессов:
+
+```toml
+# игнорировать, пока активно окно программы (игры: X11/XWayland)
+exclude_focus = ["dota2"]
+# игнорировать всё время, пока процесс запущен (фокус не важен)
+exclude_running = []
+```
+
+Добавить/убрать без правки файла:
+
+```fish
+switcher-ctl focus                                      # кто сейчас в фокусе
+switcher-ctl exclude.add pattern=dota2 mode=focus
+switcher-ctl exclude.del pattern=dota2 mode=focus
+```
 
 ## Запуск из исходников
 
@@ -71,6 +99,8 @@ python3 -m venv .venv
 
 - `switcher/intercept.py` — захват клавиатуры, буфер слова, удержание
   boundary-клавиши, hotkeys
+- `switcher/focus.py` — что за окно сейчас впереди (X11/XWayland: `_NET_ACTIVE_WINDOW`,
+  `_NET_WM_PID`, `WM_CLASS`) и имена процессов из `/proc` — на этом держатся исключения
 - `switcher/injector.py` — uinput-эмуляция: backspace, переключение раскладки,
   перепечатка символа на нужной физической клавише
 - `switcher/core.py` — решение (decide), словари, таблицы раскладок `US2RU` /
@@ -81,8 +111,9 @@ python3 -m venv .venv
 
 ## Требования
 
-- Linux (KDE Plasma, X11), Python 3.9+
+- Linux (KDE Plasma, X11 или Wayland), Python 3.9+
 - `evdev`, `PySide6`, `hunspell` + словари `ru_RU`, `en_US`
+- для исключений по активному окну: `python-xlib` (быстро) или `xprop` (fallback)
 
 ## Лицензия
 

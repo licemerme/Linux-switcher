@@ -4,11 +4,13 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ROOT/temp/rpmbuild"
-VERSION=1.0.0
+VERSION=1.1.0
 
 cd "$ROOT"
 rm -rf "$OUT"
-mkdir -p "$OUT/SOURCES" "$OUT/SPECS" "$OUT/BUILD" "$OUT/RPMS" "$OUT/SRPMS"
+# Every scratch dir stays inside temp/: the system /var/tmp may be read-only
+# (sandbox, or a box with a separate small /var), and rpmbuild dies on it.
+mkdir -p "$OUT/SOURCES" "$OUT/SPECS" "$OUT/BUILD" "$OUT/RPMS" "$OUT/SRPMS" "$OUT/tmp"
 
 tar czf "$OUT/SOURCES/switcher-$VERSION.tar.gz" \
     --transform "s,^,switcher-$VERSION/," \
@@ -16,7 +18,8 @@ tar czf "$OUT/SOURCES/switcher-$VERSION.tar.gz" \
 
 cp packaging/switcher.spec "$OUT/SPECS/"
 
-rpmbuild --define "_topdir $OUT" -bb "$OUT/SPECS/switcher.spec"
+rpmbuild --define "_topdir $OUT" --define "_tmppath $OUT/tmp" \
+         -bb "$OUT/SPECS/switcher.spec"
 
 echo
 echo "Built:"

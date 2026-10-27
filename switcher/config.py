@@ -3,6 +3,7 @@
 # ipc command "config.reload".
 from __future__ import annotations
 
+import copy
 import os
 import tomllib
 
@@ -59,12 +60,44 @@ DEFAULTS = {
     "gap_bs": 0.012,
     "gap_type": 0.012,
     "debug": False,
+    # Tray notification when the switcher steps aside for an excluded program
+    # (a game started, or its window got focus) and when it comes back.
+    "notify_exclude": True,
+    # Exclusion lists. A process named here is never touched: the daemon
+    # releases the grip on the keyboard and simply gets out of the way.
+    #   exclude_focus   - only while that program's window is focused
+    #                     (works for X11/XWayland windows: games)
+    #   exclude_running - the whole time the process exists, focus is irrelevant
+    "exclude_focus": [],
+    "exclude_running": [],
 }
+
+
+def _clean_list(value):
+    # Exclusion lists: strings only, trimmed, de-duplicated case-insensitively.
+    # Quotes and newlines are rejected here because _fmt() cannot round-trip them.
+    out, seen = [], set()
+    for item in value if isinstance(value, (list, tuple)) else []:
+        if not isinstance(item, str):
+            continue
+        s = item.strip()
+        if not s or len(s) > 120:
+            continue
+        if any(bad in s for bad in ('"', "\n", "\r")):
+            continue
+        low = s.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(s)
+    return out
 
 
 def _coerce(key, value):
     # Cast a TOML value to the type of its default; ignore nonsense.
     default = DEFAULTS[key]
+    if isinstance(default, list):
+        return _clean_list(value)
     if isinstance(default, bool):
         return value if isinstance(value, bool) else default
     if isinstance(default, int):
@@ -82,7 +115,9 @@ def _coerce(key, value):
 
 def load():
     # Read config.toml, filling in defaults. Never raises.
-    cfg = dict(DEFAULTS)
+    # deepcopy: the lists in DEFAULTS must never be shared with the live config,
+    # otherwise an edit would silently mutate the defaults themselves.
+    cfg = copy.deepcopy(DEFAULTS)
     try:
         with open(paths.config, "rb") as f:
             raw = tomllib.load(f)
@@ -95,6 +130,8 @@ def load():
 
 
 def _fmt(v):
+    if isinstance(v, list):
+        return "[" + ", ".join(_fmt(x) for x in v) + "]"
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):

@@ -25,6 +25,7 @@ import time
 from evdev import ecodes
 
 from . import config as cfg
+from . import focus as focus_probe
 from .capture import keyboard_paths
 from .core import US2RU, SHIFT_US2RU
 from .core import Switcher, default_dictionaries, remap, split_trail
@@ -42,6 +43,11 @@ CFG = cfg.ensure_files()
 LOG_PATH = cfg.paths.log
 LEARNED_PATH = cfg.paths.learned
 BLOCKED_PATH = cfg.paths.blocked
+
+# How often the exclusion watcher looks at the focused window. 0.3 s is a
+# compromise: fast enough that a game never sees our pass-through for long,
+# cheap enough to be invisible (one X property round-trip per tick).
+EXCLUSION_POLL = 0.3
 
 SETTLE = CFG["settle"]            # uinput Ctrl+Shift fallback: wait for KDE
 SETTLE_DBUS = CFG["settle_dbus"]  # DBus setLayout is synchronous
@@ -352,6 +358,9 @@ def main():
 
     # ------------------------------------------------------------------ wiring
     it.on_word = on_word
+    # Taking the keyboard back happens inside the interceptor loop; the layout
+    # may have been switched by KWin while an excluded program owned it.
+    it.on_resume = lambda: resync_layout("after exclusion")
     # Register every left/right modifier combination: the user may well press
     # right Alt or right Ctrl, and exact-match combos would silently miss it.
     ctrls = (ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL)
@@ -447,6 +456,11 @@ def main():
         return {
             "paused": bool(state["paused"]),
             "layout": it.layout,
+            "excluded": excl["active"],
+            "excluded_mode": excl["mode"],
+            "suppressed": bool(it.suppressed),
+            "exclude_focus": list(CFG.get("exclude_focus") or []),
+            "exclude_running": list(CFG.get("exclude_running") or []),
             "learned": _words_of(sw.learned),
             "blocked": _words_of(sw.blocked),
             "words_learned": sum(len(v) for v in sw.learned.values()),
@@ -485,8 +499,116 @@ def main():
         cfg.save(CFG)
         out = _config_apply()
         _log("ipc: config set " + repr(changed))
+        # An exclusion edited through config.set must take effect immediately,
+        # not on the next tick 0.3 s later.
+        try:
+            _exclusion_tick()
+        except Exception as e:
+            _log("exclusion probe error: " + type(e).__name__ + ": " + str(e))
         ipc_srv.broadcast({"event": "config", "value": out})
         return out
+
+    # -------------------------------------------------------------- exclusion
+    # A program listed in config.toml is NOT ours. Two ways to name one:
+    #   exclude_focus   - only while that program's window is focused
+    #                     (X11/XWayland windows only: games; see focus.py)
+    #   exclude_running - the whole time the process exists, focus irrelevant
+    # While an exclusion is in force the interceptor lets go of the keyboard
+    # completely: the kernel hands raw events to the game, with no extra uinput
+    # device in the path, no modifier staging and no word buffering. Hotkeys do
+    # not work either - there is nothing left to intercept, which is the point.
+    excl = {"active": None, "mode": None, "window": None}
+    stop_flag = threading.Event()
+    excl_probe_logged = {"done": False}
+
+    def _patterns():
+        return (list(CFG.get("exclude_focus") or []),
+                list(CFG.get("exclude_running") or []))
+
+    def _exclusion_tick():
+        """One look at the world: are we supposed to be hands-off right now?"""
+        pat_f, pat_r = _patterns()
+        hit, mode, win = None, None, None
+        if pat_f:
+            win = focus_probe.active_window()
+            if not excl_probe_logged["done"]:
+                excl_probe_logged["done"] = True
+                if win.get("ok"):
+                    _log("focus probe: ok, active window pid=" + str(win.get("pid"))
+                         + " class=" + repr(win.get("wm_class")))
+                else:
+                    _log("focus probe: unknown (" + str(win.get("why")) + ")")
+            if win.get("ok"):
+                hit = focus_probe.window_matches(pat_f, win)
+                if hit:
+                    mode = "focus"
+        if not hit and pat_r:
+            hit = focus_probe.find_running(pat_r)
+            if hit:
+                mode = "running"
+        excl["window"] = win
+        if hit == excl["active"] and mode == excl["mode"]:
+            return
+        prev = excl["active"]
+        excl["active"], excl["mode"] = hit, mode
+        it.suppress_requested = bool(hit)
+        if hit:
+            _log(f"exclusion ON: {hit!r} ({mode}) - keyboard released")
+        elif prev:
+            _log(f"exclusion OFF: {prev!r} - interception back on")
+        if ipc_srv is not None:
+            ipc_srv.broadcast({"event": "excluded", "pattern": hit, "mode": mode})
+
+    def _exclusion_loop():
+        while not stop_flag.is_set():
+            try:
+                _exclusion_tick()
+            except Exception as e:
+                _log("exclusion probe error: " + type(e).__name__ + ": " + str(e))
+            stop_flag.wait(EXCLUSION_POLL)
+
+    def _excl_state():
+        pat_f, pat_r = _patterns()
+        return {"focus": pat_f, "running": pat_r,
+                "active": excl["active"], "active_mode": excl["mode"],
+                "suppressed": bool(it.suppressed)}
+
+    def _excl_entry(p):
+        # Win over everything. A pattern that matches everything ("py") would
+        # silently disable the switcher, so it must be a real name.
+        mode = str(p.get("mode") or "focus")
+        if mode not in ("focus", "running"):
+            raise ValueError("mode must be 'focus' or 'running'")
+        cleaned = cfg._clean_list([str(p.get("pattern") or "")])
+        if not cleaned:
+            raise ValueError("bad pattern: " + repr(p.get("pattern")))
+        pat = cleaned[0]
+        if len(pat) < 2:
+            raise ValueError("pattern too short, 2 characters minimum: " + repr(pat))
+        return mode, pat
+
+    def _excl_add(p):
+        mode, pat = _excl_entry(p)
+        key = "exclude_focus" if mode == "focus" else "exclude_running"
+        CFG[key] = cfg._clean_list(list(CFG.get(key) or []) + [pat])
+        cfg.save(CFG)
+        _log("ipc: exclusion added " + repr(pat) + " (" + mode + ")")
+        _exclusion_tick()
+        return _excl_state()
+
+    def _excl_del(p):
+        mode, pat = _excl_entry(p)
+        key = "exclude_focus" if mode == "focus" else "exclude_running"
+        low = pat.lower()
+        before = list(CFG.get(key) or [])
+        CFG[key] = [x for x in before if x.lower() != low]
+        removed = len(CFG[key]) != len(before)
+        if removed:
+            cfg.save(CFG)
+        _log("ipc: exclusion removed " + repr(pat) + " (" + mode + ") removed="
+             + str(removed))
+        _exclusion_tick()
+        return _excl_state()
 
     def dispatch(cmd, p):
         if cmd == "ping":
@@ -517,6 +639,12 @@ def main():
             return _blocked_add(p)
         if cmd == "blocked.del":
             return _blocked_del(p)
+        if cmd == "exclude.list":
+            return _excl_state()
+        if cmd == "exclude.add":
+            return _excl_add(p)
+        if cmd == "exclude.del":
+            return _excl_del(p)
         if cmd == "config.get":
             return dict(CFG)
         if cmd == "config.set":
@@ -540,6 +668,18 @@ def main():
     ipc_srv = IPCServer(cfg.paths.socket, dispatch, log=_log)
     ipc_srv.start()
 
+    # Exclusion watcher: honours an entry that is already in force BEFORE the
+    # first grab, so the daemon never even touches the keyboard of a running
+    # game. The thread only flips it.suppress_requested; the interceptor loop
+    # owns the devices.
+    try:
+        _exclusion_tick()
+    except Exception as e:
+        _log("exclusion probe error: " + type(e).__name__ + ": " + str(e))
+    threading.Thread(target=_exclusion_loop, name="exclusion", daemon=True).start()
+    pat_f, pat_r = _patterns()
+    _log("exclusions: focus=" + repr(pat_f) + " running=" + repr(pat_r))
+
     _log("running (intercept). Ctrl+C=quit  Ctrl+Alt+P=pause  "
          "Ctrl+Alt+Z=rollback  Ctrl+Alt+B=ban  Ctrl+Alt+T=teach")
     try:
@@ -549,6 +689,7 @@ def main():
     except KeyboardInterrupt:
         _log("stopped (Ctrl+C).")
     finally:
+        stop_flag.set()
         it.stop()
         if ipc_srv is not None:
             ipc_srv.stop()

@@ -200,35 +200,47 @@ class Switcher:
             action = "switch-rus" if current_layout == "us" else "switch-eng"
             return (action, e + trail)
 
-        # Generic length guards: only for dictionary-driven (unlearned) words.
+        # Generic length guard: only for dictionary-driven (unlearned) words.
         # This is what keeps "lf" -> "да" and other 2-letter noise out.
+        # The per-variant length check lives in the loop below: the "trailing
+        # punctuation" may in fact be the last letter of the word.
         if len(w) < self.min_len:
             return ("none", None)
-        if len(alpha_part) < self.min_len:
-            return ("none", None)
 
-        # The trailing punctuation is kept EXACTLY as the user saw it.
-        # The user typed a physical key and saw a symbol; after we switch
-        # the layout, the injector re-types that same symbol using the
-        # physical key of the TARGET layout (see injector._RU_CHAR2CODE /
-        # US_CHAR2CODE). We must NOT remap the symbol: a "." the user saw
-        # stays a "." — we only move it to the right physical key.
+        # The trailing punctuation is kept EXACTLY as the user saw it: the
+        # injector re-types that symbol on the physical key of the TARGET
+        # layout, we never remap it.
+        #
+        # EXCEPT that several US keys carry a LETTER in RU:
+        #     "." -> ю   "," -> б   ";" -> ж   "'" -> э
+        #     "[" -> х   "]" -> ъ   "`" -> ё
+        # so the last character of a Russian word typed on the US layout looks
+        # like punctuation and split_trail() eats it:
+        #     "gjkyjcnm." -> полностью   (the dot is ю!)
+        #     "yj;"       -> нож          (the semicolon is ж!)
+        # Hence: try every split point, from "all of the tail is punctuation"
+        # (the old behaviour, tried first, so real punctuation wins) to "the
+        # tail belongs to the word". Variant i moves trail[:i] back in.
         if current_layout == "us":
-            cand = remap(alpha_part, "us", "ru")
-            if cand:
-                c_alpha, c_trail = split_trail(cand)
-                if (self._ru_ok(c_alpha) and not self._en_ok(alpha_part)
-                        and _has_vowel(c_alpha)):
-                    return ("switch-rus", c_alpha + c_trail + trail)
-            return ("none", None)
-        else:  # ru
-            cand = remap(alpha_part, "ru", "us")
-            if cand:
-                c_alpha, c_trail = split_trail(cand)
-                if (self._en_ok(c_alpha) and not self._ru_ok(alpha_part)
-                        and _has_vowel(c_alpha)):
-                    return ("switch-eng", c_alpha + c_trail + trail)
-            return ("none", None)
+            other, action = "ru", "switch-rus"
+            want_ok, have_ok = self._ru_ok, self._en_ok
+        else:
+            other, action = "us", "switch-eng"
+            want_ok, have_ok = self._en_ok, self._ru_ok
+        for i in range(0, len(trail) + 1):
+            probe = alpha_part + trail[:i]
+            if len(probe) < self.min_len:
+                continue
+            cand = remap(probe, current_layout, other)
+            if not cand:
+                continue
+            c_alpha, c_trail = split_trail(cand)
+            if (want_ok(c_alpha) and not have_ok(probe)
+                    and _has_vowel(c_alpha)):
+                # remap() is 1:1, so the result has exactly the length of what
+                # the user typed: the daemon's backspace count stays right.
+                return (action, c_alpha + c_trail + trail[i:])
+        return ("none", None)
 
 
 if __name__ == "__main__":
@@ -242,6 +254,9 @@ if __name__ == "__main__":
     print("'world'  cur=ru ->", sw.decide("world", "ru"))  # should be none
     print("'tot.'   cur=us ->", sw.decide("tot.", "us"))    # trailing punct
     print("'tot?'   cur=us ->", sw.decide("tot?", "us"))    # trailing punct 2
+    # The trailing "punctuation" that is really a RU letter (see decide()):
+    print("'gjkyjcnm.' cur=us ->", sw.decide("gjkyjcnm.", "us"))  # полностью
+    print("'yj;'    cur=us ->", sw.decide("yj;", "us"))          # нож
     print("'wdwef.' cur=ru ->", sw.decide("wdwef.", "ru"))  # EN word + punct on RU
     print("roundtrip rjhjkm us->ru =", remap("rjhjkm", "us", "ru"))
     # learned overrides: teach tot->еще (beats EN 'tot'), block a on ru.
