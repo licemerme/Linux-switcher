@@ -7,7 +7,7 @@
 
 Name:           switcher
 Version:        1.0.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Punto-Switcher-style automatic keyboard layout correction
 License:        MIT
 URL:            https://github.com/switcher-linux/switcher
@@ -81,6 +81,10 @@ udevadm control --reload-rules >/dev/null 2>&1 || :
 %{_datadir}/licenses/switcher/LICENSE
 
 %changelog
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 1.0.0-2
+- Unify the copyright line in packaging/LICENSE with the repo root (LICEMER);
+  broaden .gitignore (caches, patch leftovers, local secrets).
+
 * Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 1.0.0-1
 - 1.0 release. Stable RU/EN autocorrect built on EVIOCGRAB + uinput:
   full punctuation map (SHIFT_US2RU), Super key tap fix, tray start/stop

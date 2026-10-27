@@ -2,16 +2,23 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 build/
 dist/
 
 # --- Virtualenv ---------------------------------------------------------
 .venv/
 venv/
+env/
 
-# --- Build / working dirs -----------------------------------------------
+# --- Build artefacts / working dirs -------------------------------------
 temp/
-packaging/*.tar.gz
+*.tar.gz
+*.tar.xz
 *.rpm
 *.src.rpm
 
@@ -22,6 +29,8 @@ data/
 # --- Local secrets (none used today; kept out regardless) ----------------
 .env
 .env.*
+*.pem
+*.key
 
 # --- Editors / OS -------------------------------------------------------
 .idea/
@@ -29,6 +38,12 @@ data/
 *.swp
 *~
 .DS_Store
+
+# --- Patch / backup leftovers -------------------------------------------
+*.orig
+*.rej
+*.bak
+*.save
 
 # --- Personal notes: not part of the source -----------------------------
 СИСТЕМНЫЙ ПРОМТ.txt
