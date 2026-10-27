@@ -1,0 +1,35 @@
+# --- Python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# --- Virtualenv ---------------------------------------------------------
+.venv/
+venv/
+
+# --- Build / working dirs -----------------------------------------------
+temp/
+packaging/*.tar.gz
+*.rpm
+*.src.rpm
+
+# --- Runtime data (created at run time) ---------------------------------
+data/
+*.log
+
+# --- Local secrets (none used today; kept out regardless) ----------------
+.env
+.env.*
+
+# --- Editors / OS -------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# --- Personal notes: not part of the source -----------------------------
+СИСТЕМНЫЙ ПРОМТ.txt
+.aiignore

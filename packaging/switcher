@@ -1,0 +1,4 @@
+#!/bin/sh
+# Switcher Linux - daemon (keyboard intercept + IPC).
+export PYTHONPATH="/usr/lib/switcher${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m switcher.daemon "$@"

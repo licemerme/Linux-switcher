@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Switcher Linux
+GenericName=Автоисправление раскладки
+Comment=Исправляет слово, набранное не в той раскладке
+Exec=/usr/bin/switcher-tray
+Icon=switcher
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=keyboard;layout;russian;раскладка;

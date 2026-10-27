@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Switcher Tray
+Comment=Значок Switcher в системном лотке
+Exec=/usr/bin/switcher-tray
+Icon=switcher
+Terminal=false
+NoDisplay=true

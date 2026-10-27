@@ -1,0 +1,4 @@
+#!/bin/sh
+# Switcher Linux - CLI for the daemon socket.
+export PYTHONPATH="/usr/lib/switcher${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m switcher.ctl "$@"

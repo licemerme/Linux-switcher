@@ -1,0 +1,6 @@
+# Switcher Linux: access to uinput and to keyboard event devices without root.
+# The daemon grabs physical keyboards and re-emits events through /dev/uinput.
+# Requires the user to be in the input group:
+#     sudo usermod -aG input $USER   (then log out and back in)
+KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
+SUBSYSTEM=="input", KERNEL=="event*", MODE="0660", GROUP="input"

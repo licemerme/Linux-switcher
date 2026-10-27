@@ -1,0 +1,4 @@
+#!/bin/sh
+# Switcher Linux - tray icon and settings window (PySide6).
+export PYTHONPATH="/usr/lib/switcher${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m switcher.gui "$@"

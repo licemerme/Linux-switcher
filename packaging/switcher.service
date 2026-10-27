@@ -1,0 +1,17 @@
+[Unit]
+Description=Switcher Linux - layout autocorrect daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/switcher
+Restart=on-failure
+RestartSec=2
+# SIGINT makes the daemon release the keyboard grab cleanly: KeyboardInterrupt
+# is caught around Interceptor.run(), so stop is not a hard kill.
+KillSignal=SIGINT
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target
