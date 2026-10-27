@@ -66,7 +66,16 @@ def _xlib_display():
     return _xconn
 
 
-def _drop_xlib():
+def _drop_xlib(again=True):
+    """Forget the X connection. again=False reconnects on the next call.
+
+    A window that vanishes between "_NET_ACTIVE_WINDOW" and the property read
+    throws BadWindow, which python-xlib surfaces on the NEXT call: that used to
+    make us blind for 30 seconds (the reconnect backoff), and during those 30
+    seconds the daemon believed "no window matches" and grabbed the keyboard
+    back in the middle of a game. A vanished window is not a broken server, so
+    the connection is simply re-opened at once.
+    """
     global _xconn, _xnext_try
     try:
         if _xconn is not None:
@@ -74,7 +83,7 @@ def _drop_xlib():
     except Exception:
         pass
     _xconn = None
-    _xnext_try = time.time() + _RECONNECT_AFTER
+    _xnext_try = 0.0 if again is False else time.time() + _RECONNECT_AFTER
 
 
 def _pid_ok(pid):
@@ -97,10 +106,12 @@ def _active_via_xlib():
         prop = root.get_full_property(d.intern_atom("_NET_ACTIVE_WINDOW"),
                                       X.AnyPropertyType)
         if not prop or not prop.value:
-            return {"ok": False, "source": "xlib", "why": "no _NET_ACTIVE_WINDOW"}
+            return {"ok": False, "source": "xlib", "reason": "no-window",
+                    "why": "no _NET_ACTIVE_WINDOW"}
         wid = int(prop.value[0])
         if wid <= 0:
-            return {"ok": False, "source": "xlib", "why": "no active window"}
+            return {"ok": False, "source": "xlib", "reason": "no-window",
+                    "why": "no active window"}
         win = d.create_resource_object("window", wid)
         pid = None
         p = win.get_full_property(d.intern_atom("_NET_WM_PID"), X.AnyPropertyType)
@@ -123,14 +134,20 @@ def _active_via_xlib():
                 t.value.decode("utf-8", "replace")
         if pid is None and not classes:
             # The focused window is a native Wayland client: X knows its id at
-            # best, never who owns it. Honest answer: unknown.
-            return {"ok": False, "source": "xlib",
+            # best, never who owns it. reason="wayland" is a POSITIVE answer -
+            # some other window has the focus - and callers may act on it.
+            return {"ok": False, "source": "xlib", "reason": "wayland",
+                    "wid": hex(wid),
                     "why": "active window is not an X11 client"}
         return {"ok": True, "source": "xlib", "wid": hex(wid), "pid": pid,
                 "wm_class": classes, "title": title}
     except Exception as e:
-        _drop_xlib()
-        return {"ok": False, "source": "xlib",
+        # reason="error": we cannot tell what is focused. That is NOT the same
+        # as "another program is in front", so callers must not grab the
+        # keyboard back on it.
+        _drop_xlib(again=False)
+        return {"ok": False, "source": "xlib", "reason": "error",
+                "wid": locals().get("wid"),
                 "why": type(e).__name__ + ": " + str(e)}
 
 
@@ -160,10 +177,12 @@ def _active_via_xprop_uncached():
     txt = _xprop("-root", "_NET_ACTIVE_WINDOW")
     m = re.search(r"#\s*(0x[0-9a-fA-F]+)", txt)
     if not m:
-        return {"ok": False, "source": "xprop", "why": "no _NET_ACTIVE_WINDOW"}
+        return {"ok": False, "source": "xprop", "reason": "no-window",
+                "why": "no _NET_ACTIVE_WINDOW"}
     wid = int(m.group(1), 16)
     if wid <= 0:
-        return {"ok": False, "source": "xprop", "why": "no active window"}
+        return {"ok": False, "source": "xprop", "reason": "no-window",
+                "why": "no active window"}
     txt = _xprop("-id", hex(wid), "_NET_WM_PID", "WM_CLASS", "_NET_WM_NAME")
     pid = None
     m = re.search(r"_NET_WM_PID\(CARDINAL\)\s*=\s*(\d+)", txt)
@@ -178,7 +197,13 @@ def _active_via_xprop_uncached():
     if m:
         title = m.group(1)
     if pid is None and not classes:
-        return {"ok": False, "source": "xprop",
+        # xprop on a destroyed/stale id prints an error and yields nothing:
+        # that is "cannot tell", not "a Wayland window is in front".
+        if "no such window" in txt.lower() or "BadWindow" in txt:
+            return {"ok": False, "source": "xprop", "reason": "error",
+                    "wid": hex(wid), "why": "window vanished"}
+        return {"ok": False, "source": "xprop", "reason": "wayland",
+                "wid": hex(wid),
                 "why": "active window is not an X11 client"}
     return {"ok": True, "source": "xprop", "wid": hex(wid), "pid": pid,
             "wm_class": classes, "title": title}
@@ -191,7 +216,8 @@ def active_window():
     else:
         got = _active_via_xprop()
     if got is None:
-        got = {"ok": False, "source": None, "why": "no X11 connection"}
+        got = {"ok": False, "source": None, "reason": "error",
+               "why": "no X11 connection"}
     return got
 
 

@@ -6,7 +6,7 @@
 %global __brp_linkdupes /bin/true
 
 Name:           switcher
-Version:        1.1.0
+Version:        1.1.1
 Release:        1%{?dist}
 Summary:        Punto-Switcher-style automatic keyboard layout correction
 License:        MIT
@@ -88,6 +88,31 @@ udevadm control --reload-rules >/dev/null 2>&1 || :
 %{_datadir}/licenses/switcher/LICENSE
 
 %changelog
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 1.1.1-1
+- Fix: the exclusion mode used to keep forwarding keys. EVIOCGRAB is not a
+  valve - ungrab() only lets the other readers in, our fd keeps receiving the
+  same events. The interceptor now reads and DROPS everything while suppressed;
+  before this the game got every key twice (from the physical keyboard and from
+  our uinput, with modifier staging on top), which showed up as a stuck Shift,
+  dead F-keys/Super, Alt+Tab not switching and a hero that stops moving.
+- Fix: leaving the exclusion needs 3 s of a stable, SAME window in focus
+  (was 1.5 s): Alt+Tab walks the focus through several windows (the KDE switcher
+  itself is an unknown Wayland surface) and grabbing the keyboard back in the
+  middle of that chord ate Tab and left the switcher without its release.
+- Fix: a probe answer of "cannot tell" (an X error, a vanished window) no
+  longer reads as "another program is in front" - the state is kept, so a blind
+  probe can not grab the keyboard back into a running game. A BadWindow on a
+  single window no longer disables the X connection for 30 s.
+- Fix: everything we pressed on the virtual keyboard is released when the
+  keyboard leaves our hands (exclusion starts, the device disconnects, shutdown).
+  A leaked press is what made one key dead for the whole session ("а/f types
+  nothing until the daemon is stopped") - only closing uinput cleared it.
+- Fix: swallow counters expire after 2 s, so a key whose release was never seen
+  cannot stay dead forever. The layout is re-read when an exclusion ends (KWin
+  may have switched it while the game owned the keyboard).
+- --debug now also traces the key flow (staged modifiers, flushes, swallowed
+  keys, keys held longer than 10 s), which is what found the bugs above.
+
 * Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 1.1.0-1
 - Per-program exclusions (exclude_focus / exclude_running): while an excluded
   program owns the screen the daemon ungrabs every keyboard, so the game gets

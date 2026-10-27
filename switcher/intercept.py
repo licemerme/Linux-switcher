@@ -30,6 +30,7 @@ blacklists that name so a restart never grabs our own output device.
 """
 from __future__ import annotations
 
+import errno
 import select
 import time
 
@@ -63,6 +64,21 @@ _EXTRA_CAPS = {
     ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA,
     ecodes.KEY_BACKSPACE, ecodes.KEY_ENTER, ecodes.KEY_SPACE, ecodes.KEY_TAB,
 }
+
+
+# A swallowed key whose physical release never arrives must not stay dead.
+SWALLOW_TTL = 2.0
+# --debug: warn when a key stays pressed on the virtual device this long (a
+# leaked press is what makes the session treat a modifier as held forever).
+STUCK_WARN = 10.0
+
+
+def _name(code):
+    """Human name of a key code for the log ("KEY_LEFTCTRL")."""
+    try:
+        return ecodes.KEY[code]
+    except (KeyError, IndexError, TypeError):
+        return str(code)
 
 
 _CTRL_ALT_META = frozenset({
@@ -103,7 +119,12 @@ class Interceptor:
         self._held = set()
         self._pending_mods = []              # staged modifier presses
         self._in_combo = False
-        self._swallow = {}                   # code -> number of events to drop
+        # code -> [events_to_drop, timestamp]. The timestamp matters: a
+        # counter whose key release will never reach us (we lost the grab in
+        # between) must expire instead of eating that key's next press - a
+        # "dead A/F key" until the daemon restarts.
+        self._swallow = {}
+        self.debug = False                   # --debug: log key flow
         self._stop = False
         self.correcting = False              # True while we rewrite a word
         self._mods = set()                   # ctrl/alt/meta currently held
@@ -116,6 +137,13 @@ class Interceptor:
         # another thread on purpose: only this loop may touch the devices.
         self.suppress_requested = False
         self.suppressed = False
+        # Codes WE hold on the virtual device. When the keyboard goes back to
+        # the system, everything in here must be released first: X11 tracks key
+        # state per device, so a press from our uinput device that is never
+        # released here stays logically down forever (the game then behaves as
+        # if Shift were held - "everything runs through Shift").
+        self._down = {}                       # code -> press timestamp
+        self._events_while_suppressed = False
         # Called once when we take the keyboard back: KWin owns the layout in
         # the meantime, so the daemon has to look it up again (see daemon.py).
         self.on_resume = None
@@ -144,6 +172,11 @@ class Interceptor:
 
     # -- low level ---------------------------------------------------------
     def _emit(self, code, value):
+        # Track what the virtual device holds (see self._down).
+        if value == 1:
+            self._down[code] = time.time()
+        elif value == 0:
+            self._down.pop(code, None)
         self._ui.write(ecodes.EV_KEY, code, value)
         self._ui.syn()
 
@@ -158,11 +191,21 @@ class Interceptor:
         return ok
 
     def _ungrab(self):
+        ok = 0
         for d in self.devices:
             try:
                 d.ungrab()
-            except Exception:
-                pass
+                ok += 1
+            except OSError as exc:
+                # EINVAL just means "this fd holds no grab" (hurtful on a
+                # repeat), anything else is worth a line in the log.
+                if getattr(exc, "errno", None) != errno.EINVAL:
+                    self.log("ungrab failed on %s: %s"
+                             % (getattr(d, "path", d), exc))
+            except Exception as exc:
+                self.log("ungrab failed on %s: %s"
+                         % (getattr(d, "path", d), exc))
+        return ok
 
     def _prune(self):
         """Drop devices that disappeared (BT off) so select() stays usable."""
@@ -181,6 +224,9 @@ class Interceptor:
     # -- device bookkeeping ------------------------------------------------
     def _drop(self, dev, why):
         """A keyboard went away (BT switched host, slept, unplugged)."""
+        # The releases of keys we are holding will never arrive through THIS
+        # device any more: hand them over or they stay stuck for the session.
+        self._release_held("keyboard %s gone" % why)
         try:
             dev.ungrab()
         except Exception:
@@ -232,6 +278,8 @@ class Interceptor:
             elif not self._grab():
                 raise RuntimeError("could not grab any keyboard: add user to group input")
             last_scan = 0.0
+            last_watch = 0.0
+            stuck = set()
             while not self._stop:
                 if self.suppress_requested != self.suppressed:
                     self._set_suppressed(self.suppress_requested)
@@ -253,6 +301,19 @@ class Interceptor:
                 except (OSError, ValueError):
                     self._prune()
                     continue
+                if self.debug:
+                    now = time.time()
+                    if now - last_watch > 1.0:
+                        last_watch = now
+                        for code in list(self._down):
+                            if now - self._down[code] > STUCK_WARN and code not in stuck:
+                                stuck.add(code)
+                                self.log("WARNING: %s has been held on the virtual "
+                                         "keyboard for %.0f s"
+                                         % (_name(code), now - self._down[code]))
+                        for code in list(stuck):
+                            if code not in self._down:
+                                stuck.discard(code)
                 for dev in list(r):
                     try:
                         # dev.read() is lazy: the OSError may come from the
@@ -264,6 +325,7 @@ class Interceptor:
                     except ValueError:
                         self._drop(dev, "closed")
         finally:
+            self._release_held("shutdown")
             self._ungrab()
             for d in self.devices:
                 try:
@@ -276,30 +338,62 @@ class Interceptor:
                 pass
 
     # -- exclusion ---------------------------------------------------------
+    def _release_held(self, why):
+        """Let go of everything we are holding, and forget pending state.
+
+        Called whenever the keyboard leaves our hands (an exclusion starts, the
+        device disconnects). A key WE pressed on the virtual device that never
+        gets its release stays logically down for the whole session: the user
+        then types into a "held Ctrl/Alt" and single keys look dead - and only
+        closing the uinput device clears it (which is why stopping the daemon
+        used to "fix" it). Presses that were merely staged are dropped, never
+        forwarded: the program has not seen them.
+        """
+        self.buffer.clear()
+        self._held.clear()
+        self._in_combo = False
+        self._mods.clear()
+        self._mods_swallowed.clear()
+        # Pending swallow counters (a hotkey or a held-back Tab whose release
+        # we were still waiting for): that release will never arrive here, and
+        # a stale counter would eat the next press of that key.
+        self._swallow.clear()
+        self._pending_mods.clear()
+        released = []
+        for code in sorted(self._down):
+            self._emit(code, 0)
+            released.append(_name(code))
+        self._down.clear()
+        if released:
+            self.log("released keys still held on the virtual keyboard (%s): %s"
+                     % (why, " ".join(released)))
+
     def _set_suppressed(self, want):
         """Own the keyboard, or get out of its way completely.
 
         want=True  - an excluded program (a game) is in charge: ungrab every
                      keyboard, so the kernel delivers the events straight to it
                      with zero added latency and no modifier staging, and drop
-                     all word state.
+                     all word state. The loop keeps READING the devices and
+                     throwing the events away (see _dispatch): an ungrab does
+                     not stop delivery to our fd, it only lets others read too.
         want=False - grab again.
         """
         want = bool(want)
         if want == self.suppressed:
             return
-        self.buffer.clear()
-        self._held.clear()
-        self._in_combo = False
-        self._mods.clear()
-        self._mods_swallowed.clear()
         if want:
-            # Anything already staged belongs to the window that is losing
-            # focus: hand it over instead of eating a held Ctrl/Alt.
-            self._flush_mods()
-            self._ungrab()
+            # Staged modifiers are DROPPED, not flushed: the program never saw
+            # those presses, so forwarding them here would hand it half a
+            # keystroke (press from us, release from the physical device).
+            # Whatever we already pressed on our uinput device must be
+            # released now (see _release_held).
+            self._release_held("exclusion")
+            n = self._ungrab()
             self.suppressed = True
-            self.log("exclusion ON: keyboard released, not intercepting")
+            self._events_while_suppressed = False
+            self.log("exclusion ON: keyboard released (%d device(s)), "
+                     "not intercepting" % n)
             return
         self.suppressed = False
         # The layout could have been switched (by KWin, since the game had the
@@ -317,6 +411,22 @@ class Interceptor:
         self.log(f"exclusion OFF: grabbed {n} keyboard(s) again")
 
     def _dispatch(self, ev):
+        if self.suppressed:
+            # THE most important line of the exclusion feature.
+            #
+            # EVIOCGRAB is not a valve: ungrab() only makes the events reach
+            # the OTHER readers as well, our fd keeps receiving the very same
+            # stream. Without this early return the game got every key twice -
+            # once from the physical device (the kernel lets it through now)
+            # and once from our uinput, with modifier staging and word
+            # buffering on top. In the field that looked like: Shift stuck
+            # down, F-keys and Super dead, Alt+Tab not switching, hero not
+            # moving (right-click with a stuck Shift queues an order instead
+            # of moving).
+            #
+            # So: read and drop. Reading keeps the kernel buffers empty and the
+            # device liveness visible, and the resume needs no drain.
+            return
         if ev.type == ecodes.EV_KEY:
             self._key(ev.code, ev.value)
         # EV_SYN: we syn ourselves after every event.
@@ -329,6 +439,8 @@ class Interceptor:
         Ctrl/Alt/Shift/Meta in the right order, right before the next key."""
         if not self._pending_mods:
             return
+        if self.debug:
+            self.log("flush mods: " + " ".join(_name(c) for c in self._pending_mods))
         for c in self._pending_mods:
             self._emit(c, 1)
         self._pending_mods.clear()
@@ -353,7 +465,10 @@ class Interceptor:
         self._pending_mods.clear()
         if swallow:
             # Our own hotkey: the app and KWin must not see this key at all.
-            self._swallow[code] = self._swallow.get(code, 0) + 1
+            self._swallow[code] = [self._swallow.get(code, [0, 0.0])[0] + 1,
+                                   time.time()]
+            if self.debug:
+                self.log("KEY %s swallowed (hotkey)" % _name(code))
             # Its release is eaten in step 1, so drop it from the combo set now:
             # otherwise _held never empties and _in_combo sticks at True.
             self._held.discard(code)
@@ -368,10 +483,18 @@ class Interceptor:
             self.shift = bool(value)
 
         # 1) a held-back key: its press was dropped, drop release and repeats too
-        if self._swallow.get(code):
+        pending = self._swallow.get(code)
+        if pending and time.time() - pending[1] > SWALLOW_TTL:
+            # The release we were waiting for never arrived (the grab was lost
+            # in between): forget it, otherwise this key stays dead.
+            self.log("swallow counter for %s expired - that key's release was "
+                     "never seen" % _name(code))
+            del self._swallow[code]
+            pending = None
+        if pending:
             if value == 0:
-                self._swallow[code] -= 1
-                if not self._swallow[code]:
+                pending[0] -= 1
+                if not pending[0]:
                     del self._swallow[code]
                 # The press was never forwarded, but this IS its release, so it
                 # must still clear the combo bookkeeping. Otherwise a swallowed
@@ -401,6 +524,8 @@ class Interceptor:
                 # Its press belonged to our hotkey and was never forwarded.
                 self._mods_swallowed.discard(code)
                 return
+            if self.debug and code in _MODS:
+                self.log("KEY %s up" % _name(code))
             if is_mod and code in self._pending_mods:
                 # Still staged: a modifier tapped on its own (Win -> Start,
                 # Alt -> menu, Ctrl+Shift -> layout toggle) must still reach
@@ -417,6 +542,8 @@ class Interceptor:
         if is_mod:
             if code not in self._pending_mods:
                 self._pending_mods.append(code)
+                if self.debug:
+                    self.log("KEY %s down (staged)" % _name(code))
             self._try_combo(code)
             return
 
@@ -450,7 +577,11 @@ class Interceptor:
             if held:
                 # The terminator is handled by us: re-emit it and drop the
                 # physical press/release pair that is still on its way.
-                self._swallow[code] = self._swallow.get(code, 0) + 1
+                self._swallow[code] = [self._swallow.get(code, [0, 0.0])[0] + 1,
+                                       time.time()]
+                if self.debug:
+                    self.log("KEY %s held back (boundary, correction ran)"
+                             % _name(code))
                 self._emit(code, 1)
                 self._emit(code, 0)
                 return

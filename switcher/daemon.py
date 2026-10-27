@@ -48,6 +48,16 @@ BLOCKED_PATH = cfg.paths.blocked
 # compromise: fast enough that a game never sees our pass-through for long,
 # cheap enough to be invisible (one X property round-trip per tick).
 EXCLUSION_POLL = 0.3
+# How long "not excluded" has to hold before the keyboard is grabbed back -
+# and it has to be the SAME window the whole time. The focus probe blinks
+# during ordinary use: Alt+Tab makes KWin bounce the focus through several
+# windows (the switcher itself is a Wayland surface, i.e. "unknown"), a load
+# screen changes the window, an overlay steals it for a moment. Grabbing the
+# keyboard back in the middle of such a chord is how the game ends up with a
+# stuck Alt/Tab and how the KDE switcher loses its release. 3 s of a stable
+# window is longer than any window-switch gesture and still feels instant when
+# the user really moved to another program.
+EXCLUSION_LEAVE_DWELL = 3.0
 
 SETTLE = CFG["settle"]            # uinput Ctrl+Shift fallback: wait for KDE
 SETTLE_DBUS = CFG["settle_dbus"]  # DBus setLayout is synchronous
@@ -361,6 +371,9 @@ def main():
     # Taking the keyboard back happens inside the interceptor loop; the layout
     # may have been switched by KWin while an excluded program owned it.
     it.on_resume = lambda: resync_layout("after exclusion")
+    # --debug also traces the key flow (modifiers, swallows, leaked presses):
+    # a stuck modifier is invisible otherwise.
+    it.debug = bool(state["debug"])
     # Register every left/right modifier combination: the user may well press
     # right Alt or right Ctrl, and exact-match combos would silently miss it.
     ctrls = (ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL)
@@ -490,6 +503,9 @@ def main():
         sw.min_len = max(3, requested)
         if requested < 3:
             _log("config: min_len=" + str(requested) + " ignored, floor is 3")
+        # --debug from the command line wins; otherwise the config knob, so the
+        # settings window can switch the key-flow trace on and off live.
+        it.debug = bool(CFG.get("debug")) or ("--debug" in sys.argv)
         return dict(CFG)
 
     def _config_set(p):
@@ -517,7 +533,9 @@ def main():
     # completely: the kernel hands raw events to the game, with no extra uinput
     # device in the path, no modifier staging and no word buffering. Hotkeys do
     # not work either - there is nothing left to intercept, which is the point.
-    excl = {"active": None, "mode": None, "window": None}
+    excl = {"active": None, "mode": None, "window": None,
+            "cand": None, "cand_wid": None, "cand_since": 0.0,
+            "flips": [], "unknown": 0}
     stop_flag = threading.Event()
     excl_probe_logged = {"done": False}
 
@@ -528,7 +546,7 @@ def main():
     def _exclusion_tick():
         """One look at the world: are we supposed to be hands-off right now?"""
         pat_f, pat_r = _patterns()
-        hit, mode, win = None, None, None
+        hit, mode, win, why = None, None, None, ""
         if pat_f:
             win = focus_probe.active_window()
             if not excl_probe_logged["done"]:
@@ -542,20 +560,74 @@ def main():
                 hit = focus_probe.window_matches(pat_f, win)
                 if hit:
                     mode = "focus"
+                excl["unknown"] = 0
+            elif win.get("reason") == "wayland":
+                # Some OTHER window is in front (a native Wayland one we cannot
+                # name). That is a real answer: the excluded program lost the
+                # focus, so the switcher may come back.
+                excl["unknown"] = 0
+            else:
+                # The probe could not tell what is focused (an X error, a
+                # window that vanished, no X connection at all). That is NOT
+                # "another program is in front": grabbing the keyboard back on
+                # a blind probe is how the daemon ends up intercepting a game
+                # mid-match. Keep whatever state we are in.
+                excl["unknown"] = excl.get("unknown", 0) + 1
+                if excl["unknown"] == 1:
+                    _log("focus probe gave no answer (%s) - keeping the state as is"
+                         % (win.get("why") or "unknown"))
+                if not excl["active"]:
+                    excl["window"] = win
+                    return
+                hit, mode = excl["active"], excl["mode"]
         if not hit and pat_r:
             hit = focus_probe.find_running(pat_r)
             if hit:
                 mode = "running"
         excl["window"] = win
-        if hit == excl["active"] and mode == excl["mode"]:
+        now = time.time()
+        if bool(hit) == bool(excl["active"]):
+            if mode != excl["mode"]:
+                excl["mode"] = mode
+            excl["cand"] = None
             return
+        # HYSTERESIS. Entering an exclusion is urgent - a game is about to take
+        # the keyboard. Leaving it is not: the probe can answer "no match" for a
+        # moment (load screen, an overlay window, an unknown focus on Wayland)
+        # and every flip costs a grab/ungrab pair. That churn is what leaves the
+        # game with a half-delivered keystroke: while a game is loading or the
+        # window changes, the keyboard gets grabbed back and the staging logic
+        # starts eating modifiers in the middle of the game.
+        # The window that produced the "not excluded" answer. A chord like
+        # Alt+Tab walks the focus through several windows within a second, so
+        # two different windows must not add up to one stable state.
+        cand_wid = None if hit else (win or {}).get("wid")
+        if excl["cand"] != hit or cand_wid != excl.get("cand_wid"):
+            excl["cand"] = hit
+            excl["cand_wid"] = cand_wid
+            excl["cand_since"] = now
+        if not hit and (now - excl["cand_since"]) < EXCLUSION_LEAVE_DWELL:
+            return          # not enough quiet yet: stay as we are
+        flips = excl["flips"]
+        flips.append(now)
+        while flips and now - flips[0] > 10.0:
+            flips.pop(0)
+        if len(flips) == 4:
+            _log("WARNING: exclusion state keeps flipping (%d changes in %.0f s) "
+                 "- the focus probe is unstable, staying as quiet as possible"
+                 % (len(flips), now - flips[0]))
         prev = excl["active"]
         excl["active"], excl["mode"] = hit, mode
+        excl["cand"] = None
         it.suppress_requested = bool(hit)
         if hit:
-            _log(f"exclusion ON: {hit!r} ({mode}) - keyboard released")
+            _log("exclusion ON: %r (%s) - keyboard released  [window pid=%s class=%r]"
+                 % (hit, mode, (win or {}).get("pid"), (win or {}).get("wm_class")))
         elif prev:
-            _log(f"exclusion OFF: {prev!r} - interception back on")
+            _log("exclusion OFF: %r - interception back on  [probe: %s, wid=%s pid=%s class=%r]"
+                 % (prev, why or (win or {}).get("reason") or "ok",
+                    (win or {}).get("wid"), (win or {}).get("pid"),
+                    (win or {}).get("wm_class")))
         if ipc_srv is not None:
             ipc_srv.broadcast({"event": "excluded", "pattern": hit, "mode": mode})
 
