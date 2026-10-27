@@ -6,8 +6,8 @@
 %global __brp_linkdupes /bin/true
 
 Name:           switcher
-Version:        0.3.0
-Release:        6%{?dist}
+Version:        1.0.0
+Release:        1%{?dist}
 Summary:        Punto-Switcher-style automatic keyboard layout correction
 License:        MIT
 URL:            https://github.com/switcher-linux/switcher
@@ -81,26 +81,31 @@ udevadm control --reload-rules >/dev/null 2>&1 || :
 %{_datadir}/licenses/switcher/LICENSE
 
 %changelog
-* Tue Oct 27 2026 Sanek <seff@localhost> - 0.3.0-6
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 1.0.0-1
+- 1.0 release. Stable RU/EN autocorrect built on EVIOCGRAB + uinput:
+  full punctuation map (SHIFT_US2RU), Super key tap fix, tray start/stop
+  toggle, IPC shutdown, legacy prototypes moved to legacy/.
+
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 0.3.0-6
 - Tray: the daemon entry flips to "stop the daemon" while it is running;
   new IPC command shutdown (answers first, then exits and ungrabs).
 
-* Tue Oct 27 2026 Sanek <seff@localhost> - 0.3.0-5
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 0.3.0-5
 - Super key fix: a modifier tapped alone (Win/Alt/Ctrl+Shift) is now
   replayed as press+release instead of being dropped by the staging
   logic; our own hotkeys swallow their modifiers instead.
 
-* Tue Oct 27 2026 Sanek <seff@localhost> - 0.3.0-4
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 0.3.0-4
 - Full punctuation map: shifted symbols on the letter keys ([ ] ; #' , . / \) 
   now survive a layout switch; SHIFT_US2RU keeps RU2US intact.
 
-* Tue Oct 27 2026 Sanek <seff@localhost> - 0.3.0-3
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 0.3.0-3
 - Punctuation fix: track Shift in the interceptor and map shifted US symbols
   to RU punctuation (Shift+6 = colon), so #"ok:#" no longer becomes #"jr6#"
 
-* Tue Oct 27 2026 Sanek <seff@localhost> - 0.3.0-2
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 0.3.0-2
 - Fix false autocorrect: 2-letter words and words with digits are ignored,
   target must contain a vowel (kills ok -> jr / Jr. abbreviation)
 
-* Tue Oct 27 2026 Sanek <seff@localhost> - 0.3.0-1
+* Tue Oct 27 2026 Sanek <LICEMER.ME@gmail.com> - 0.3.0-1
 - Initial package: intercept daemon, IPC socket, PySide6 tray and settings window

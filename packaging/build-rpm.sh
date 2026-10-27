@@ -4,7 +4,7 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ROOT/temp/rpmbuild"
-VERSION=0.3.0
+VERSION=1.0.0
 
 cd "$ROOT"
 rm -rf "$OUT"
